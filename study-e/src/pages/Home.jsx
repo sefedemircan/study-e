@@ -54,12 +54,76 @@ export function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubject, setSelectedSubject] = useState('');
   const [favoriteRooms, setFavoriteRooms] = useState(new Set());
+  const [stats, setStats] = useState({
+    total_study_time: 0,
+    daily_study_time: 0,
+    daily_goal: 300,
+    total_sessions: 0,
+    xp_points: 0
+  });
   const navigate = useNavigate();
 
   useEffect(() => {
     const getUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      setUser(user);
+      if (user) {
+        setUser(user);
+        // Kullanıcı istatistiklerini al
+        const { data: statsData, error: statsError } = await supabase
+          .from('user_stats')
+          .select('*')
+          .eq('user_id', user.id)
+          .single();
+
+        if (statsError) {
+          console.error('Stats error:', statsError);
+        } else if (statsData) {
+          // Eğer son çalışma tarihi bugün değilse, günlük çalışma süresini sıfırla
+          if (new Date(statsData.last_study_date).toDateString() !== new Date().toDateString()) {
+            const { error: updateError } = await supabase
+              .from('user_stats')
+              .update({ 
+                daily_study_time: 0,
+                last_study_date: new Date().toISOString()
+              })
+              .eq('user_id', user.id);
+
+            if (updateError) {
+              console.error('Update error:', updateError);
+            }
+
+            setStats({
+              ...statsData,
+              daily_study_time: 0
+            });
+          } else {
+            setStats(statsData);
+          }
+        }
+
+        // Realtime stats subscription
+        const statsSubscription = supabase
+          .channel('user_stats_changes')
+          .on('postgres_changes', 
+            { 
+              event: '*', 
+              schema: 'public', 
+              table: 'user_stats',
+              filter: `user_id=eq.${user.id}`
+            }, 
+            (payload) => {
+              console.log('Stats updated:', payload);
+              if (payload.new) {
+                setStats(payload.new);
+              }
+            }
+          )
+          .subscribe();
+
+        return () => {
+          statsSubscription.unsubscribe();
+        };
+      }
     };
     getUser();
     fetchRooms();
@@ -167,6 +231,18 @@ export function Home() {
 
   const subjects = [...new Set(rooms.map(room => room.subject))];
 
+  // Dakikayı saat:dakika formatına çevir
+  const formatTime = (minutes) => {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return `${hours}s ${mins}dk`;
+  };
+
+  // Günlük hedef yüzdesini hesapla
+  const getDailyProgress = () => {
+    return Math.min(100, Math.round((stats.daily_study_time / stats.daily_goal) * 100));
+  };
+
   return (
     <AppShell
       header={{ height: 60 }}
@@ -227,14 +303,16 @@ export function Home() {
                 <RingProgress
                   size={80}
                   thickness={8}
-                  sections={[{ value: 65, color: 'orange' }]}
+                  sections={[{ value: getDailyProgress(), color: 'orange' }]}
                   label={
-                    <Text ta="center" size="xs">65%</Text>
+                    <Text ta="center" size="xs">{getDailyProgress()}%</Text>
                   }
                 />
                 <div>
                   <Text size="sm">Günlük Hedef</Text>
-                  <Text size="xs" c="dimmed">3 saat / 5 saat</Text>
+                  <Text size="xs" c="dimmed">
+                    {formatTime(stats.daily_study_time)} / {formatTime(stats.daily_goal)}
+                  </Text>
                 </div>
               </Group>
               <Divider />
@@ -244,7 +322,7 @@ export function Home() {
                 </ThemeIcon>
                 <div>
                   <Text size="sm">Toplam Süre</Text>
-                  <Text size="xs" c="dimmed">24 saat</Text>
+                  <Text size="xs" c="dimmed">{formatTime(stats.total_study_time)}</Text>
                 </div>
               </Group>
               <Group>
@@ -253,7 +331,7 @@ export function Home() {
                 </ThemeIcon>
                 <div>
                   <Text size="sm">Katılınan Ders</Text>
-                  <Text size="xs" c="dimmed">12 ders</Text>
+                  <Text size="xs" c="dimmed">{stats.total_sessions} ders</Text>
                 </div>
               </Group>
               <Group>
@@ -262,7 +340,7 @@ export function Home() {
                 </ThemeIcon>
                 <div>
                   <Text size="sm">Başarı Puanı</Text>
-                  <Text size="xs" c="dimmed">850 XP</Text>
+                  <Text size="xs" c="dimmed">{stats.xp_points} XP</Text>
                 </div>
               </Group>
             </Stack>

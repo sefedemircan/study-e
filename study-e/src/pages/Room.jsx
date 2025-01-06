@@ -18,6 +18,8 @@ export function Room() {
   const userVideo = useRef();
   const peersRef = useRef([]);
   const [participants, setParticipants] = useState(new Set());
+  const [studyStartTime, setStudyStartTime] = useState(null);
+  const statsUpdateInterval = useRef(null);
 
   // Yeni bir peer bağlantısı oluştur
   const createPeer = useCallback((targetUserId, stream) => {
@@ -358,8 +360,72 @@ export function Room() {
     initializeMedia();
   }, [room, id, user, createPeer, addPeer]);
 
+  // İstatistikleri güncelle
+  const updateStats = useCallback(async () => {
+    if (!user || !studyStartTime) return;
+
+    const now = new Date();
+    const studyTimeInMinutes = Math.floor((now - studyStartTime) / (1000 * 60));
+
+    try {
+      const { data: currentStats, error: fetchError } = await supabase
+        .from('user_stats')
+        .select('*')
+        .eq('user_id', user.id)
+        .single();
+
+      if (fetchError) throw fetchError;
+
+      const { error: updateError } = await supabase
+        .from('user_stats')
+        .update({
+          total_study_time: currentStats.total_study_time + studyTimeInMinutes,
+          daily_study_time: currentStats.daily_study_time + studyTimeInMinutes,
+          total_sessions: currentStats.total_sessions + 1,
+          xp_points: currentStats.xp_points + Math.floor(studyTimeInMinutes / 5), // Her 5 dakika için 1 XP
+          last_study_date: now.toISOString()
+        })
+        .eq('user_id', user.id);
+
+      if (updateError) throw updateError;
+
+      // Yeni periyot için başlangıç zamanını güncelle
+      setStudyStartTime(now);
+    } catch (error) {
+      console.error('Stats update error:', error);
+    }
+  }, [user, studyStartTime]);
+
+  // Odaya katılma ve ayrılma işlemleri
+  useEffect(() => {
+    if (user && room) {
+      // Odaya katıldığında başlangıç zamanını ayarla
+      setStudyStartTime(new Date());
+
+      // Her 5 dakikada bir istatistikleri güncelle
+      statsUpdateInterval.current = setInterval(updateStats, 5 * 60 * 1000);
+
+      return () => {
+        // Odadan ayrılırken son bir güncelleme yap
+        updateStats();
+        // Interval'i temizle
+        if (statsUpdateInterval.current) {
+          clearInterval(statsUpdateInterval.current);
+        }
+      };
+    }
+  }, [user, room, updateStats]);
+
   const leaveRoom = async () => {
     if (!room) return;
+
+    // Son istatistik güncellemesini yap
+    await updateStats();
+
+    // Interval'i temizle
+    if (statsUpdateInterval.current) {
+      clearInterval(statsUpdateInterval.current);
+    }
 
     // Katılımcı sayısını azalt
     await supabase
